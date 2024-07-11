@@ -226,8 +226,18 @@ void update_positions_cpu(int index, double* x, double* y, double* vx, double* v
 	if (x[index] < X_MIN || x[index] > X_MAX || y[index] < Y_MIN || y[index] > Y_MAX) {
 		std::cerr << "Planet " << index << " is out of bounds" << std::endl;
 		// Make  the planet reappear on the other side of the screen
-		x[index] = X_MIN + (X_MAX - X_MIN) * (rand() / (RAND_MAX + 1.0));
-		y[index] = Y_MIN + (Y_MAX - Y_MIN) * (rand() / (RAND_MAX + 1.0));
+		if (x[index] < X_MIN) {
+			x[index] = X_MAX;
+		}
+		else if (x[index] > X_MAX) {
+			x[index] = X_MIN;
+		}
+		if (y[index] < Y_MIN) {
+			y[index] = Y_MAX;
+		}
+		else if (y[index] > Y_MAX) {
+			y[index] = Y_MIN;
+		}
 	}
 
 }
@@ -582,6 +592,9 @@ int main(int argc, char* argv[]) {
 		// Write FPS and IPS to the text
 		text.setString("FPS: " + std::to_string(fps) + " IPS: " + std::to_string(ips));
 		window.draw(text);
+
+		// Save frames to a video
+
 
 	}
 
