@@ -318,6 +318,7 @@ SRCS = planet_simulator.cu
 SRC_DIR = src
 BUILD_DIR = build
 OBJECTS = $(SRCS:%.cu=$(BUILD_DIR)/%.o)
+ALL_LDFLAGS += $(shell pkg-config --libs sfml-all)
 
 
 ################################################################################

@@ -3,12 +3,26 @@
 #include <fstream>
 #include <cmath>
 #include <thread>
+#include <pthread.h>
+#include <SFML/Graphics.hpp>
+#include <signal.h>
 #include "helpers.h"
 
-const int X_MAX = 1000;
-const int Y_MAX = 1000;
+const int X_MAX = 1920;
+const int Y_MAX = 1080;
 const int X_MIN = 0;
 const int Y_MIN = 0;
+
+// Upper and lower bounds for the size of the planets
+// Use for max radius Jupiter
+const double MAX_RADIUS = 69911.0e3;
+// Use for min radius Mercury
+const double MIN_RADIUS = 2439.7e3;
+
+const double G = 6.67430e-11;
+
+// Use same average density for all planets as Earth
+const double DENSITY = 5514.0;
 
 
 int  n = 0;
@@ -17,6 +31,23 @@ double dt = 0;
 std::string output_file_name;
 bool use_cpu = false;
 bool use_gpu = false;
+bool infinite_loop = false;
+
+// Thread barrier
+// TODO: later for threads that are not killed and respawned between time steps
+pthread_barrier_t* barrier;
+
+// FPS counter
+int fps = 0;
+
+// Iterations per second counter
+int ips = 0;
+
+// Elasped iterations
+int iterations = 0;
+
+// Drawing counter
+int draw = 0;
 
 
 // CPU side
@@ -39,6 +70,86 @@ double* d_vx = nullptr;
 double* d_vy = nullptr;
 
 
+struct color {
+	int r;
+	int g;
+	int b;
+} ;
+
+struct color* colors = nullptr;
+
+// arrays for planet sizes
+int* sizes = nullptr;
+int* d_sizes = nullptr;
+
+void init_planet_positions() {
+	// Initialize the positions of the planets
+	for (int i = 0; i < n; i++) {
+		x[i] = X_MIN + (X_MAX - X_MIN) * (rand() / (RAND_MAX + 1.0));
+		y[i] = Y_MIN + (Y_MAX - Y_MIN) * (rand() / (RAND_MAX + 1.0));
+	}
+}
+
+void init_planet_velocities() {
+	// Initialize the velocities of the planets
+	for (int i = 0; i < n; i++) {
+		vx[i] = 0;
+		vy[i] = 0;
+	}
+}
+
+// Thread function that compute and update FPS
+void compute_ips() {
+	while (true) {
+		// Store the number of iterations
+		int current_iterations = iterations;
+		// Sleep for one second
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		// Compute the IPS
+		ips = iterations - current_iterations;
+	}
+}
+
+// Thread function that compute and update FPS
+void compute_fps() {
+	while (true) {
+		// Store the number of draws
+		int current_draw = draw;
+		// Sleep for one second
+		std::this_thread::sleep_for(std::chrono::seconds(1));
+		// Compute the FPS
+		fps = draw - current_draw;
+	}
+}
+
+void init_barriers() {
+	// Initialize the barrier
+	barrier = new pthread_barrier_t;
+	pthread_barrier_init(barrier, nullptr, n);
+}
+
+void init_colors() {
+	// Initialize the colors of the planets
+	colors = new struct color[n];
+	for (int i = 0; i < n; i++) {
+		colors[i].r = rand() % 256;
+		colors[i].g = rand() % 256;
+		colors[i].b = rand() % 256;
+	}
+}
+
+void init_sizes() {
+	// Initialize the sizes of the planets randomly between MIN_SIZE and MAX_SIZE
+	sizes = new int[n];
+	for (int i = 0; i < n; i++) {
+		sizes[i] = MIN_RADIUS + (MAX_RADIUS - MIN_RADIUS) * (rand() / (RAND_MAX + 1.0));
+	}
+	// Allocate the sizes on the GPU
+	cudaMalloc(&d_sizes, n * sizeof(int));
+	cudaMemcpy(d_sizes, sizes, n * sizeof(int), cudaMemcpyHostToDevice);
+}
+
+
 int parse_arguments(int argc, char* argv[]) {
 	// Arguments are:
 	// 1. Number of planets
@@ -47,9 +158,11 @@ int parse_arguments(int argc, char* argv[]) {
 	// 4. Output file name
 	// 5. Use CPU
 	// 6. Use GPU
+	// 7. Infinite loop
+
 	// Check if the number of arguments is correct
-	if (argc != 7) {
-		std::cerr << "Usage: " << argv[0] << " <number of planets> <number of time steps> <time step size> <output file name> <use CPU> <use GPU>" << std::endl;
+	if (argc != 8) {
+		std::cerr << "Usage: " << argv[0] << " <number of planets> <number of time steps> <time step size> <output file name> <use CPU> <use GPU> <infinite loop>" << std::endl;
 		return 1;
 	}
 	// Parse the arguments
@@ -59,6 +172,7 @@ int parse_arguments(int argc, char* argv[]) {
 	output_file_name = argv[4];
 	use_cpu = std::atoi(argv[5]);
 	use_gpu = std::atoi(argv[6]);
+	infinite_loop = std::atoi(argv[7]);
 
 	// Check if the number of planets is correct
 	if (n < 2) {
@@ -87,41 +201,43 @@ void  update_velocities_cpu(int index, double* x, double* y, double* vx, double*
 			double dx = x[j] - x[index];
 			double dy = y[j] - y[index];
 			double d = std::sqrt(dx * dx + dy * dy);
-			double f = 1.0 / (d * d);
-			vx[index] += f * dx * dt;
-			vy[index] += f * dy * dt;
+			double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[index], 3);
+			double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[j], 3);
+			double f = G * m1 * m2 / (d * d * d);
+			double a = f / m1;
+			vx[index] += a * dx * dt;
+			vy[index] += a * dy * dt;
 		}
 	}
 }
+
 
 // thread function for updating the positions of the planets
 void update_positions_cpu(int index, double* x, double* y, double* vx, double* vy, double dt) {
 	// Update the position of the planet
 	x[index] += vx[index] * dt;
 	y[index] += vy[index] * dt;
+	// print  the position of the planet
+	std::cout << "Planet " << index << " x: " << x[index] << " y: " << y[index] << std::endl;
 }
 
 void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) {
+	// Reset iterations
+	iterations = 0;
+	// Reset planet positions
+	init_planet_positions();
+	// Reset planet velocities
+	init_planet_velocities();
 	// Open the output file
 	std::ofstream output_file(output_file_name);
 	if (!output_file.is_open()) {
 		std::cerr << "Failed to open the output file" << std::endl;
 		return;
 	}
-	// Initialize the planets
-	double* x = new double[n];
-	double* y = new double[n];
-	double* vx = new double[n];
-	double* vy = new double[n];
-	for (int i = 0; i < n; i++) {
-		x[i] = 1.0 * i;
-		y[i] = 0.0;
-		vx[i] = 0.0;
-		vy[i] = 0.0;
-	}
 	// Simulate the planets
 	std::thread* threads = new std::thread[n];
-	for (int i = 0; i < t; i++) {
+	int i = 0;
+	for (i = 0; ; i++) {
 		// Output the positions of the planets
 		for (int j = 0; j < n; j++) {
 			output_file << x[j] << " " << y[j] << " ";
@@ -145,6 +261,11 @@ void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) 
 		for (int j = 0; j < n; j++) {
 			threads[j].join();
 		}
+		// increment the iterations
+		iterations++;
+		if (!infinite_loop && i >= t - 1) {
+			break;
+		}
 	}
 	// deallocate the threads
 	delete[] threads;
@@ -164,13 +285,6 @@ void init_arrays_cpu() {
 	y = new double[n];
 	vx = new double[n];
 	vy = new double[n];
-	// Initialize the planets
-	for (int i = 0; i < n; i++) {
-		x[i] = 1.0 * i;
-		y[i] = 0.0;
-		vx[i] = 0.0;
-		vy[i] = 0.0;
-	}
 	debug_print("CPU: arrays initialized");
 }
 
@@ -216,7 +330,7 @@ void free_arrays_gpu() {
 	cudaFree(d_vy);
 }
 
-__global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt) {
+__global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt, int* d_sizes) {
 	// Get the index of the planet
 	int i = blockIdx.x * blockDim.x + threadIdx.x;
 	// Check if the index is valid
@@ -224,12 +338,19 @@ __global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx,
 		// Update the velocities of the planet
 		for (int j = 0; j < n; j++) {
 			if (i != j) {
+				// Compute the distance between the planets
 				double dx = d_x[j] - d_x[i];
 				double dy = d_y[j] - d_y[i];
 				double d = sqrt(dx * dx + dy * dy);
-				double f = 1.0 / (d * d);
+				// Compute planet masses
+				double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[i], 3);
+				double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[j], 3);
+				// Compute the force between the planets using Newton's law of universal gravitation, F = G * m1 * m2 / d^2
+				double f = G * m1 * m2 / (d * d);
+				// Update the velocity of the planet
 				d_vx[i] += f * dx * dt;
 				d_vy[i] += f * dy * dt;
+
 			}
 		}
 	}
@@ -247,9 +368,13 @@ __global__ void update_positions(int n, double* d_x, double* d_y, double* d_vx, 
 }
 
 void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) {
-	// init arrays
-	init_arrays_gpu();
-	init_arrays_cpu();
+	// Reset iterations
+	iterations = 0;
+	// Reset planet positions
+	init_planet_positions();
+	// Reset planet velocities
+	init_planet_velocities();
+
 	// Copy the arrays to the GPU
 	copy_arrays_to_gpu();
 
@@ -262,7 +387,8 @@ void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) 
 	}
 	debug_print("GPU: output file opened");
 	// Simulate the planets
-	for (int i = 0; i < t; i++) {
+	int i = 0;
+	for (i = 0; ; i++) {
 		// Copy the arrays from the GPU
 		copy_arrays_from_gpu();
 		// Output the positions of the planets
@@ -271,21 +397,21 @@ void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) 
 		}
 		output_file << std::endl;
 		// Update the velocities of the planets
-		update_velocities<<<(n + 255) / 256, 256>>>(n, d_x, d_y, d_vx, d_vy, dt);
+		update_velocities<<<(n + 255) / 256, 256>>>(n, d_x, d_y, d_vx, d_vy, dt, d_sizes);
 		//cudaDeviceSynchronize();
 		// Update the positions of the planets
 		update_positions<<<(n + 255) / 256, 256>>>(n, d_x, d_y, d_vx, d_vy, dt);
 		//cudaDeviceSynchronize();
+		// Increment the iterations
+		iterations++;
+		if (!infinite_loop && i >= t - 1) {
+			break;
+		}
 	}
 
 }
 
-
-int main(int argc, char* argv[]) {
-	// Parse the arguments
-	if (parse_arguments(argc, argv) != 0) {
-		return 1;
-	}
+void simulation() {
 	// Simulate the planets with CPU
 	// Add to output file name the cpu prefix
 	time_t start, end;
@@ -309,7 +435,113 @@ int main(int argc, char* argv[]) {
 		time(&end);
 		std::cout << "GPU time: " << difftime(end, start) << " seconds" << std::endl;
 	}
+}
 
+
+void draw_planets(sf::RenderWindow& window) {
+	// Draw the planets with  random colors
+	for (int i = 0; i < n; i++) {
+		sf::CircleShape planet(5);
+		planet.setFillColor(sf::Color(colors[i].r, colors[i].g, colors[i].b));
+		planet.setPosition(x[i], y[i]);
+		window.draw(planet);
+	}
+}
+
+void init_memory() {
+	init_arrays_cpu();
+	init_arrays_gpu();
+}
+
+void init_planets() {
+	init_planet_positions();
+	init_planet_velocities();
+	init_colors();
+	init_sizes();
+}
+
+int main(int argc, char* argv[]) {
+	// Parse the arguments
+	if (parse_arguments(argc, argv) != 0) {
+		return 1;
+	}
+
+	// Create the window the same size as the screen
+	sf::RenderWindow window(sf::VideoMode(X_MAX, Y_MAX), "Planet Simulator");
+
+
+	// Load the font
+	sf::Font font;
+	if (!font.loadFromFile("/usr/share/fonts/truetype/msttcorefonts/arial.ttf")) {
+		std::cerr << "Failed to load the font" << std::endl;
+		return 1;
+	}
+	// Create the text
+	sf::Text text;
+	sf::Text text2;
+	text.setFont(font);
+	text.setCharacterSize(24);
+	text.setFillColor(sf::Color::White);
+	text.setPosition(10, 10);
+	text2.setFont(font);
+	text2.setCharacterSize(24);
+	text2.setFillColor(sf::Color::White);
+	text2.setPosition(10, 100);
+
+
+	// Initialize memory
+	init_memory();
+
+	// Initialize the planets
+	init_planets();
+
+	// Start a thread for the simulation
+	std::thread simulation_thread(simulation);
+
+	// Start a thread for computing the FPS
+	std::thread ips_thread(compute_ips);
+
+	// Start a thread for computing the IPS
+	std::thread fps_thread(compute_fps);
+
+	// Register signal handler for SIGINT (Ctrl+C)
+	signal(SIGINT, [](int signum) {
+		// Exit
+		exit(0);
+	});
+
+	// Start the game loop
+	while (window.isOpen()) {
+		// Process events
+		sf::Event event;
+		while (window.pollEvent(event))
+		{
+			// Close window: exit
+			if (event.type == sf::Event::Closed)
+				window.close();
+		}
+
+		// Clear screen
+		window.clear();
+
+		// Draw the string
+		window.draw(text);
+
+		// Draw the planets
+		draw_planets(window);
+
+
+		// Update the window
+		window.display();
+
+		// Increment the draw counter
+		draw++;
+
+		// Write FPS and IPS to the text
+		text.setString("FPS: " + std::to_string(fps) + " IPS: " + std::to_string(ips));
+		window.draw(text);
+
+	}
 
 	return 0;
 }
