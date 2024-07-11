@@ -19,6 +19,9 @@ const double MAX_RADIUS = 69911.0e3;
 // Use for min radius Mercury
 const double MIN_RADIUS = 2439.7e3;
 
+const int MIN_SIZE = 1;
+const int MAX_SIZE = 20;
+
 const double G = 6.67430e-11;
 
 // Use same average density for all planets as Earth
@@ -218,7 +221,15 @@ void update_positions_cpu(int index, double* x, double* y, double* vx, double* v
 	x[index] += vx[index] * dt;
 	y[index] += vy[index] * dt;
 	// print  the position of the planet
-	std::cout << "Planet " << index << " x: " << x[index] << " y: " << y[index] << std::endl;
+	//std::cout << "Planet " << index << " x: " << x[index] << " y: " << y[index] << std::endl;
+	// Check if the planet is out of bounds
+	if (x[index] < X_MIN || x[index] > X_MAX || y[index] < Y_MIN || y[index] > Y_MAX) {
+		std::cerr << "Planet " << index << " is out of bounds" << std::endl;
+		// Make  the planet reappear on the other side of the screen
+		x[index] = X_MIN + (X_MAX - X_MIN) * (rand() / (RAND_MAX + 1.0));
+		y[index] = Y_MIN + (Y_MAX - Y_MIN) * (rand() / (RAND_MAX + 1.0));
+	}
+
 }
 
 void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) {
@@ -346,10 +357,11 @@ __global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx,
 				double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[i], 3);
 				double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[j], 3);
 				// Compute the force between the planets using Newton's law of universal gravitation, F = G * m1 * m2 / d^2
-				double f = G * m1 * m2 / (d * d);
+				double f = G * m1 * m2 / (d * d * d);
+				double a = f / m1;
 				// Update the velocity of the planet
-				d_vx[i] += f * dx * dt;
-				d_vy[i] += f * dy * dt;
+				d_vx[i] += a * dx * dt;
+				d_vy[i] += a * dy * dt;
 
 			}
 		}
@@ -364,6 +376,22 @@ __global__ void update_positions(int n, double* d_x, double* d_y, double* d_vx, 
 		// Update the position of the planet
 		d_x[i] += d_vx[i] * dt;
 		d_y[i] += d_vy[i] * dt;
+	}
+	// Check if the planet is out of bounds
+	if (d_x[i] < X_MIN || d_x[i] > X_MAX || d_y[i] < Y_MIN || d_y[i] > Y_MAX) {
+		// Make the planet reappear on the other side of the screen
+		if (d_x[i] < X_MIN) {
+			d_x[i] = X_MAX;
+		}
+		else if (d_x[i] > X_MAX) {
+			d_x[i] = X_MIN;
+		}
+		if (d_y[i] < Y_MIN) {
+			d_y[i] = Y_MAX;
+		}
+		else if (d_y[i] > Y_MAX) {
+			d_y[i] = Y_MIN;
+		}
 	}
 }
 
@@ -441,7 +469,13 @@ void simulation() {
 void draw_planets(sf::RenderWindow& window) {
 	// Draw the planets with  random colors
 	for (int i = 0; i < n; i++) {
-		sf::CircleShape planet(5);
+		// Map planet size to radius using linear interpolation
+		// 1. Find the percentage of the size of the planet between MIN_SIZE and MAX_SIZE
+		double percentage = (sizes[i] - MIN_RADIUS) / (MAX_RADIUS - MIN_RADIUS);
+		// 2. Find the radius of the planet between MIN_RADIUS and MAX_RADIUS
+		double radius = MIN_SIZE + percentage * (MAX_SIZE - MIN_SIZE);
+		// 3. Draw the planet
+		sf::CircleShape planet(radius);
 		planet.setFillColor(sf::Color(colors[i].r, colors[i].g, colors[i].b));
 		planet.setPosition(x[i], y[i]);
 		window.draw(planet);
@@ -460,11 +494,19 @@ void init_planets() {
 	init_sizes();
 }
 
+void init_rand_seed() {
+	// Initialize the random seed
+	srand(time(nullptr));
+}
+
 int main(int argc, char* argv[]) {
 	// Parse the arguments
 	if (parse_arguments(argc, argv) != 0) {
 		return 1;
 	}
+
+	// Initialize the random seed
+	init_rand_seed();
 
 	// Create the window the same size as the screen
 	sf::RenderWindow window(sf::VideoMode(X_MAX, Y_MAX), "Planet Simulator");
