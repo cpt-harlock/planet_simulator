@@ -319,6 +319,12 @@ SRC_DIR = src
 BUILD_DIR = build
 OBJECTS = $(SRCS:%.cu=$(BUILD_DIR)/%.o)
 ALL_LDFLAGS += $(shell pkg-config --libs sfml-all)
+COLOR_YELLOW := "\033[1;33m"
+COLOR_RESET := "\033[0m"
+COLOR_GREEN := "\033[1;32m"
+COLOR_RED := "\033[1;31m"
+COLOR_CYAN := "\033[1;36m"
+
 
 
 ################################################################################
@@ -337,9 +343,11 @@ else
 endif
 
 $(TARGETS): %: $(OBJECTS)
+	@echo $(COLOR_CYAN) "Building target: $@" $(COLOR_RESET)
 	$(EXEC) $(NVCC) $(ALL_LDFLAGS) $^ -o $@ $(LIBRARIES)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cu
+	@echo $(COLOR_GREEN) "Compiling: $<" $(COLOR_RESET)
 	$(EXEC) $(NVCC) $(ALL_CCFLAGS) $(GENCODE_FLAGS) $(INCLUDES) -c $< -o $@
 
 run: build
@@ -348,6 +356,7 @@ run: build
 testrun: build
 
 clean:
+	@echo $(COLOR_RED) "Cleaning up..." $(COLOR_RESET)
 	rm -f $(TARGETS) $(OBJECTS)
 
 clobber: clean

@@ -1,3 +1,4 @@
+#include <SFML/Window/Keyboard.hpp>
 #include <cstdlib>
 #include <iostream>
 #include <fstream>
@@ -52,6 +53,9 @@ int iterations = 0;
 // Drawing counter
 int draw = 0;
 
+// Constants for the simulation
+bool paused = false;
+
 
 // CPU side
 //  array of x coordinates of the planets
@@ -84,6 +88,104 @@ struct color* colors = nullptr;
 // arrays for planet sizes
 int* sizes = nullptr;
 int* d_sizes = nullptr;
+
+// thread function for updating the velocities of the planets
+void  update_velocities_cpu(int index, double* x, double* y, double* vx, double* vy, double dt) {
+	// Update the velocities of the planet
+	for (int j = 0; j < n; j++) {
+		if (index != j) {
+			double dx = x[j] - x[index];
+			double dy = y[j] - y[index];
+			double d = std::sqrt(dx * dx + dy * dy);
+			double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[index], 3);
+			double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[j], 3);
+			double f = G * m1 * m2 / (d * d * d);
+			double a = f / m1;
+			vx[index] += a * dx * dt;
+			vy[index] += a * dy * dt;
+		}
+	}
+}
+
+__global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt, int* d_sizes) {
+	// Get the index of the planet
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	// Check if the index is valid
+	if (i < n) {
+		// Update the velocities of the planet
+		for (int j = 0; j < n; j++) {
+			if (i != j) {
+				// Compute the distance between the planets
+				double dx = d_x[j] - d_x[i];
+				double dy = d_y[j] - d_y[i];
+				double d = sqrt(dx * dx + dy * dy);
+				// Compute planet masses
+				double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[i], 3);
+				double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[j], 3);
+				// Compute the force between the planets using Newton's law of universal gravitation, F = G * m1 * m2 / d^2
+				double f = G * m1 * m2 / (d * d * d);
+				double a = f / m1;
+				// Update the velocity of the planet
+				d_vx[i] += a * dx * dt;
+				d_vy[i] += a * dy * dt;
+
+			}
+		}
+	}
+}
+
+// thread function for updating the positions of the planets
+void update_positions_cpu(int index, double* x, double* y, double* vx, double* vy, double dt) {
+	// Update the position of the planet
+	x[index] += vx[index] * dt;
+	y[index] += vy[index] * dt;
+	// print  the position of the planet
+	//std::cout << "Planet " << index << " x: " << x[index] << " y: " << y[index] << std::endl;
+	// Check if the planet is out of bounds
+	if (x[index] < X_MIN || x[index] > X_MAX || y[index] < Y_MIN || y[index] > Y_MAX) {
+		std::cerr << "Planet " << index << " is out of bounds" << std::endl;
+		// Make  the planet reappear on the other side of the screen
+		if (x[index] < X_MIN) {
+			x[index] = X_MAX;
+		}
+		else if (x[index] > X_MAX) {
+			x[index] = X_MIN;
+		}
+		if (y[index] < Y_MIN) {
+			y[index] = Y_MAX;
+		}
+		else if (y[index] > Y_MAX) {
+			y[index] = Y_MIN;
+		}
+	}
+
+}
+__global__ void update_positions(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt) {
+	// Get the index of the planet
+	int i = blockIdx.x * blockDim.x + threadIdx.x;
+	// Check if the index is valid
+	if (i < n) {
+		// Update the position of the planet
+		d_x[i] += d_vx[i] * dt;
+		d_y[i] += d_vy[i] * dt;
+	}
+	// Check if the planet is out of bounds
+	if (d_x[i] < X_MIN || d_x[i] > X_MAX || d_y[i] < Y_MIN || d_y[i] > Y_MAX) {
+		// Make the planet reappear on the other side of the screen
+		if (d_x[i] < X_MIN) {
+			d_x[i] = X_MAX;
+		}
+		else if (d_x[i] > X_MAX) {
+			d_x[i] = X_MIN;
+		}
+		if (d_y[i] < Y_MIN) {
+			d_y[i] = Y_MAX;
+		}
+		else if (d_y[i] > Y_MAX) {
+			d_y[i] = Y_MIN;
+		}
+	}
+}
 
 void init_planet_positions() {
 	// Initialize the positions of the planets
@@ -196,51 +298,8 @@ int parse_arguments(int argc, char* argv[]) {
 	return 0;
 }
 
-// thread function for updating the velocities of the planets
-void  update_velocities_cpu(int index, double* x, double* y, double* vx, double* vy, double dt) {
-	// Update the velocities of the planet
-	for (int j = 0; j < n; j++) {
-		if (index != j) {
-			double dx = x[j] - x[index];
-			double dy = y[j] - y[index];
-			double d = std::sqrt(dx * dx + dy * dy);
-			double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[index], 3);
-			double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(sizes[j], 3);
-			double f = G * m1 * m2 / (d * d * d);
-			double a = f / m1;
-			vx[index] += a * dx * dt;
-			vy[index] += a * dy * dt;
-		}
-	}
-}
 
 
-// thread function for updating the positions of the planets
-void update_positions_cpu(int index, double* x, double* y, double* vx, double* vy, double dt) {
-	// Update the position of the planet
-	x[index] += vx[index] * dt;
-	y[index] += vy[index] * dt;
-	// print  the position of the planet
-	//std::cout << "Planet " << index << " x: " << x[index] << " y: " << y[index] << std::endl;
-	// Check if the planet is out of bounds
-	if (x[index] < X_MIN || x[index] > X_MAX || y[index] < Y_MIN || y[index] > Y_MAX) {
-		std::cerr << "Planet " << index << " is out of bounds" << std::endl;
-		// Make  the planet reappear on the other side of the screen
-		if (x[index] < X_MIN) {
-			x[index] = X_MAX;
-		}
-		else if (x[index] > X_MAX) {
-			x[index] = X_MIN;
-		}
-		if (y[index] < Y_MIN) {
-			y[index] = Y_MAX;
-		}
-		else if (y[index] > Y_MAX) {
-			y[index] = Y_MIN;
-		}
-	}
-
-}
 
 void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) {
 	// Reset iterations
@@ -257,8 +316,10 @@ void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) 
 	}
 	// Simulate the planets
 	std::thread* threads = new std::thread[n];
-	int i = 0;
-	for (i = 0; ; i++) {
+	for (; ;) {
+		if (paused) {
+			continue;
+		}
 		// Output the positions of the planets
 		for (int j = 0; j < n; j++) {
 			output_file << x[j] << " " << y[j] << " ";
@@ -284,7 +345,7 @@ void simulate_cpu(int n, int t, double dt, const std::string& output_file_name) 
 		}
 		// increment the iterations
 		iterations++;
-		if (!infinite_loop && i >= t - 1) {
+		if (!infinite_loop && iterations >= t - 1) {
 			break;
 		}
 	}
@@ -351,60 +412,6 @@ void free_arrays_gpu() {
 	cudaFree(d_vy);
 }
 
-__global__ void update_velocities(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt, int* d_sizes) {
-	// Get the index of the planet
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	// Check if the index is valid
-	if (i < n) {
-		// Update the velocities of the planet
-		for (int j = 0; j < n; j++) {
-			if (i != j) {
-				// Compute the distance between the planets
-				double dx = d_x[j] - d_x[i];
-				double dy = d_y[j] - d_y[i];
-				double d = sqrt(dx * dx + dy * dy);
-				// Compute planet masses
-				double m1 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[i], 3);
-				double m2 = DENSITY * 4.0 / 3.0 * M_PI * pow(d_sizes[j], 3);
-				// Compute the force between the planets using Newton's law of universal gravitation, F = G * m1 * m2 / d^2
-				double f = G * m1 * m2 / (d * d * d);
-				double a = f / m1;
-				// Update the velocity of the planet
-				d_vx[i] += a * dx * dt;
-				d_vy[i] += a * dy * dt;
-
-			}
-		}
-	}
-}
-
-__global__ void update_positions(int n, double* d_x, double* d_y, double* d_vx, double* d_vy, double dt) {
-	// Get the index of the planet
-	int i = blockIdx.x * blockDim.x + threadIdx.x;
-	// Check if the index is valid
-	if (i < n) {
-		// Update the position of the planet
-		d_x[i] += d_vx[i] * dt;
-		d_y[i] += d_vy[i] * dt;
-	}
-	// Check if the planet is out of bounds
-	if (d_x[i] < X_MIN || d_x[i] > X_MAX || d_y[i] < Y_MIN || d_y[i] > Y_MAX) {
-		// Make the planet reappear on the other side of the screen
-		if (d_x[i] < X_MIN) {
-			d_x[i] = X_MAX;
-		}
-		else if (d_x[i] > X_MAX) {
-			d_x[i] = X_MIN;
-		}
-		if (d_y[i] < Y_MIN) {
-			d_y[i] = Y_MAX;
-		}
-		else if (d_y[i] > Y_MAX) {
-			d_y[i] = Y_MIN;
-		}
-	}
-}
-
 void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) {
 	// Reset iterations
 	iterations = 0;
@@ -425,8 +432,10 @@ void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) 
 	}
 	debug_print("GPU: output file opened");
 	// Simulate the planets
-	int i = 0;
-	for (i = 0; ; i++) {
+	for (; ;) {
+		if (paused) {
+			continue;
+		}
 		// Copy the arrays from the GPU
 		copy_arrays_from_gpu();
 		// Output the positions of the planets
@@ -442,7 +451,7 @@ void simulate_gpu(int n, int t, double dt, const std::string& output_file_name) 
 		//cudaDeviceSynchronize();
 		// Increment the iterations
 		iterations++;
-		if (!infinite_loop && i >= t - 1) {
+		if (!infinite_loop && iterations >= t - 1) {
 			break;
 		}
 	}
@@ -509,6 +518,14 @@ void init_rand_seed() {
 	srand(time(nullptr));
 }
 
+void pause_simulation() {
+	paused = true;
+}
+
+void resume_simulation() {
+	paused = false;
+}
+
 int main(int argc, char* argv[]) {
 	// Parse the arguments
 	if (parse_arguments(argc, argv) != 0) {
@@ -521,6 +538,8 @@ int main(int argc, char* argv[]) {
 	// Create the window the same size as the screen
 	sf::RenderWindow window(sf::VideoMode(X_MAX, Y_MAX), "Planet Simulator");
 
+	window.setVerticalSyncEnabled(true); // call it once, after creating the window
+	//window.setFramerateLimit(120); // call it once, after creating the window
 
 	// Load the font
 	sf::Font font;
@@ -571,6 +590,32 @@ int main(int argc, char* argv[]) {
 			// Close window: exit
 			if (event.type == sf::Event::Closed)
 				window.close();
+			if (event.type == sf::Event::KeyPressed) {
+				if (event.key.code == sf::Keyboard::R) {
+					// Stop the simulation
+					pause_simulation();
+					// Draw a "Resetting" message
+					//text.setString("Resetting...");
+					// Sleep for 1 second
+					//std::this_thread::sleep_for(std::chrono::seconds(1));
+					// Remove the "Resetting" message
+					//text.setString("");
+					// Reset the planets
+					init_planets();
+					// Copy the arrays to the GPU
+					copy_arrays_to_gpu();
+					// Reset iterations
+					iterations = 0;
+				}
+				if (event.key.code == sf::Keyboard::P) {
+					// Pause the simulation
+					pause_simulation();
+				}
+				if (event.key.code == sf::Keyboard::C) {
+					// Resume the simulation
+					resume_simulation();
+				}
+			}
 		}
 
 		// Clear screen
@@ -589,8 +634,9 @@ int main(int argc, char* argv[]) {
 		// Increment the draw counter
 		draw++;
 
-		// Write FPS and IPS to the text
-		text.setString("FPS: " + std::to_string(fps) + " IPS: " + std::to_string(ips));
+		// Write FPS, IPS and seconds  simulated to the text
+
+		text.setString("FPS: " + std::to_string(fps) + " IPS: " + std::to_string(ips) + " Elapsed seconds: " + std::to_string(iterations*dt));
 		window.draw(text);
 
 		// Save frames to a video
